@@ -24,7 +24,7 @@ import kurve
 from auxiliary import PipeException, log_gamma
 
 
-app = dash.Dash('TESS Curver Tool', external_stylesheets=[dbc.themes.BOOTSTRAP])
+app = dash.Dash(__name__, title='TESS Curver Tool', external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 
 switch_label_style = {'display': 'inline-block', 'padding': '5px'}  # In the row, otherwise 'block'
@@ -162,7 +162,7 @@ app.layout = dbc.Container([
                     ], id="search_results_row", style={"display": "none"}, md=10, sm=12),
                 ], style={'marginBottom': '10px'}),  # Search and SearchResults
                 dbc.Spinner(
-                    dbc.Label(id="download_sector_result", children='label text',
+                    dbc.Label(id="download_sector_result", children='',
                               style={"color": "green", "text-align": "center"}),
                     spinner_style={
                         # "display": "flex",
