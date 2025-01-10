@@ -7,7 +7,6 @@ This project is part of the **skvo_veb** application
 
 To install the required Aladin component, run:
 
-To install the required Aladin component, run:
 ```
 $ pip install third_party/aladin_lite_react_component-0.0.3.tar.gz
 ```
