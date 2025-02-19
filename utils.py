@@ -23,3 +23,8 @@ def log_gamma(data, gamma=0.9, log=True):
     log_data = np.log1p(data)
     # return normalize(np.power(log_data, gamma))
     return np.power(log_data, gamma)
+
+
+def safe_none(value):
+    return '' if value is None else value
+

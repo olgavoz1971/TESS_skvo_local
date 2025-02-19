@@ -28,6 +28,7 @@ dash-core-components==2.0.0
 dash-html-components==2.0.0
 dash-table==5.0.0
 dill==0.3.9
+diskcache==5.6.3
 fbpca==1.0
 Flask==3.0.3
 fonttools==4.55.3
@@ -52,6 +53,7 @@ matplotlib==3.10.0
 memoization==0.4.0
 more-itertools==10.5.0
 multidict==6.1.0
+multiprocess==0.70.17
 nest-asyncio==1.6.0
 numpy==2.1.2
 oktopus==0.1.2
@@ -61,6 +63,7 @@ patsy==1.0.1
 pillow==11.0.0
 plotly==5.24.1
 propcache==0.2.1
+psutil==7.0.0
 psycopg2-binary==2.9.10
 pycparser==2.22
 pyerfa==2.0.1.4
