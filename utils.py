@@ -1,6 +1,13 @@
+import re
+
+
 class PipeException(Exception):
     # print(f'My exception {Exception} occurred')
     pass
+
+
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[<>:"/\\|?* ]', '_', name)
 
 
 def normalize(arr):

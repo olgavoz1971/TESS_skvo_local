@@ -1,10 +1,15 @@
+# DISK_CACHE = True  # this makes sense only for a local version
+DISK_CACHE = False
+
 import logging
+import base64
+import io
 
 import lightkurve
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import dcc, html, callback, ctx, dash, set_props, clientside_callback, DiskcacheManager
+from dash import register_page, dcc, html, callback, ctx, dash, set_props, clientside_callback
 import dash_bootstrap_components as dbc
 from dash.dash_table import DataTable
 from dash.dependencies import Input, Output, State, ClientsideFunction
@@ -13,34 +18,23 @@ import plotly.express as px
 import lightkurve as lk
 from dash.exceptions import PreventUpdate
 from lightkurve import LightkurveError
-import message
-import tess_cache as cache
-from curve_dash import CurveDash
-from utils import safe_none, PipeException
-from pathlib import Path
 
-# Background callback management:
-import diskcache
-
-diskcache_dir = Path('diskcache')
-diskcache_dir.mkdir(exist_ok=True)
-background_callback_manager = DiskcacheManager(diskcache.Cache(diskcache_dir.name))
-
-app = dash.Dash(__name__,
-                background_callback_manager=background_callback_manager,
-                external_stylesheets=[dbc.themes.BOOTSTRAP])
-
-# register_page(__name__, name='TESS curve',
-#               order=4,
-#               path='/igebc/tess_lc',
-#               title='TESS lightcurve Tool',
-#               in_navbar=True)
+try:
+    from skvo_veb.components import message
+    from skvo_veb.utils import tess_cache as cache
+    from skvo_veb.utils.curve_dash import CurveDash
+    from skvo_veb.utils.my_tools import safe_none, PipeException, sanitize_filename
+except ImportError:
+    import message
+    import tess_cache as cache
+    from curve_dash import CurveDash
+    from utils import PipeException, safe_none, sanitize_filename
 
 label_font_size = '0.8em'
 switch_label_style = {'display': 'inline-block', 'padding': '2px', 'font-size': label_font_size}
 stack_wrap_style = {'marginBottom': '5px', 'flexWrap': 'wrap'}
 periodogram_param_style = {'width': '4em'}
-periodogram_result_style = {'width': '4em', 'fontWeight': 'bold', 'font-size': label_font_size}
+periodogram_result_style = {'width': '3em', 'fontWeight': 'bold', 'font-size': label_font_size}
 
 jd0_tess = 2457000  # btjd format. We can use the construction Time(2000, format="btjd", scale="tbd") directly,
 
@@ -48,14 +42,21 @@ jd0_tess = 2457000  # btjd format. We can use the construction Time(2000, format
 # So I decided it would be safer to add this constant explicitly
 
 
-fig_lc = px.scatter()
-fig_lc.update_layout(xaxis={'title': 'phase', 'tickformat': '.1f'},
-                     yaxis_title='flux',
-                     margin=dict(l=0, b=20),  # r=50, t=50, b=20))
-                     )
-fig_pg = px.scatter()  # Periodogram
+# fig_lc = px.scatter()
+# fig_lc.update_traces(
+#     selected={'marker': {'color': 'orange', 'size': 5}},
+#     hoverinfo='none',  # Important
+#     hovertemplate=None,  # Important
+# )
+# fig_lc.update_layout(xaxis={'title': 'phase', 'tickformat': '.1f'},
+#                      yaxis_title='flux',
+#                      # showlegend=True,
+#                      margin=dict(l=0, b=20),  # r=50, t=50, b=20))
+#                      # dragmode='lasso'  # Enable lasso selection mode by default
+#                      )
+# fig_pg = px.scatter()  # Periodogram
 
-app.layout = dbc.Container([
+page_layout = dbc.Container([
     html.H1('TESS Lightcurve Tool', className="text-primary text-left fs-3"),
     dbc.Tabs([
         dbc.Tab(label='Search', children=[
@@ -72,6 +73,18 @@ app.layout = dbc.Container([
                         dbc.Button('Cancel', id='cancel_basic_search_tess_lc_button',
                                    size="sm", disabled=True),
                     ], direction='horizontal', gap=2, style=stack_wrap_style),
+                    dbc.Stack([
+                        dcc.Upload(
+                            id='upload_tess_lc',
+                            children=dbc.Button('Upload', size="sm"),
+                            multiple=False,
+                            # accept='.csv,.fits,.txt',
+                            accept=','.join(f'.{ext}' for ext in CurveDash.get_extension_list()),
+                        ),
+                        dbc.Switch(id='append_switch', label='Append', value=False,
+                                   label_style=switch_label_style, persistence=False),
+                    ], direction='horizontal', gap=2, style=stack_wrap_style),  # upload
+
                 ], md=2, sm=4, xs=12, style={'padding': '10px', 'background': 'Silver', 'border-radius': '5px'}),
                 # Search tools
                 dbc.Col([
@@ -155,6 +168,7 @@ app.layout = dbc.Container([
                                            label_style=switch_label_style,
                                            # style=switch_label_style,
                                            persistence=True),
+                                # todo: add callback fired by stitch switch toggle, check it with user curve added
                             ),
                         ], md=6, sm=6),
                     ]),  # tune
@@ -166,7 +180,7 @@ app.layout = dbc.Container([
                         dbc.Col([
                             dbc.InputGroup([
                                 dcc.Input(id='period_tess_lc_input', inputMode='numeric', persistence=False,
-                                          value=None, type='number', step=0.0001,
+                                          value=None, type='number', step=0.00001,
                                           # style={'width': '100%', 'min-width': '5ch'}),
                                           style={'width': '5em'}),  # 'font-size': label_font_size}
                                 dbc.Button('x', size='sm', color='light', id='clear_period_btn')
@@ -296,7 +310,7 @@ app.layout = dbc.Container([
                     html.Div(children='', id='div_tess_lc_alert', style={'display': 'none'}),
                     dbc.Row([
                         dcc.Graph(id='graph_tess_lc',
-                                  figure=fig_lc,
+                                  figure=px.scatter(),
                                   config={'displaylogo': False},
                                   # # style={'height': '70vh'},  # 100% of the viewport height
                                   # style={'height': '40vh', 'width': '100%'},  # 100% of the viewport height
@@ -306,7 +320,7 @@ app.layout = dbc.Container([
                     dbc.Row([
                         dcc.Graph(
                             id='graph_tess_lc_periodogram',
-                            figure=fig_pg,
+                            figure=px.scatter(),
                             config={'displaylogo': False}
                         )
                     ], id='tess_lc_periodogram_row', style={'display': 'none'})  # periodogram
@@ -315,16 +329,22 @@ app.layout = dbc.Container([
             ], style={'marginBottom': '10px'}),
         ], tab_id='tess_lc_graph_tab', id='tess_lc_graph_tab', disabled=False),
     ], active_tab='tess_lc_search_tab', id='tess_lc_tabs', style={'marginBottom': '5px'}),
-    dcc.Store(id='store_tess_lightcurve'),
+    dcc.Store(id='store_tess_lightcurve'),  # downloaded lightcurve(s)
+    dcc.Store(id='store_tess_lightcurve_metadata'),  # data related to the lightcurve search (user's lookup_name)
     dcc.Download(id='download_tess_lc_lightcurve'),
-], fluid=True,
-    style={'display': 'flex', 'flexDirection': 'column', 'marginLeft': '5px'})
+], className="g-10", fluid=True, style={'display': 'flex', 'flexDirection': 'column'})
+
+if not DISK_CACHE and __name__ == '__main__':       # local version without diskcache
+    background_callback = False
+else:
+    background_callback = True
 
 
 @callback(
     # region
     output=dict(
         table_header=Output("table_tess_lc_header", "children"),
+        metadata=Output('store_tess_lightcurve_metadata', 'data'),
         table_data=Output("data_tess_lc_table", "data"),
         selected_rows=Output("data_tess_lc_table", "selected_rows"),
         content_style=Output("table_tess_lc_row", "style"),  # to show the table and Title
@@ -337,7 +357,7 @@ app.layout = dbc.Container([
     running=[(Output('basic_search_tess_lc_button', 'disabled'), True, False),
              (Output('cancel_basic_search_tess_lc_button', 'disabled'), False, True)],
     cancel=[Input('cancel_basic_search_tess_lc_button', 'n_clicks')],
-    background=True,
+    background=background_callback,
     prevent_initial_call=True
 )
 def basic_search(n_clicks, obj_name):
@@ -366,6 +386,7 @@ def basic_search(n_clicks, obj_name):
             })
         if data:
             output['table_header'] = f'Basic search  for {obj_name}'
+            output['metadata'] = {'lookup_name': obj_name}
             output['table_data'] = data
             output['selected_rows'] = [0] if data else []  # select the first row by default
             output['content_style'] = {'display': 'block'}  # show the table with search results
@@ -383,7 +404,7 @@ def basic_search(n_clicks, obj_name):
     return output
 
 
-def create_lc_from_selected_rows(selected_rows, table_data, stitch, flux_method,
+def create_lc_from_selected_rows(selected_rows, table_data, stitch, flux_method, metadata,
                                  phase_view=False, period=None) -> str:
     # return a serialized CurveDash object
     import re
@@ -501,26 +522,29 @@ def create_lc_from_selected_rows(selected_rows, table_data, stitch, flux_method,
     # time_unit = lc_list[0].time.format
     time_unit = 'jd'
     # Add information into lc title
-    title = (f'{lc_list[0].LABEL} sector: {",".join(sectors)} '
-             f'author: {",".join(authors)} methods: {",".join(flux_origins)}')
     if stitch:
-        title = 'Stitched curve ' + title
         flux_unit = 'relative flux'
     else:
         flux_unit = str(lc_list[0].flux.unit)
 
-    # todo: add flux_err
-    lcd = CurveDash(jd=valid_jd + jd0_tess, flux=valid_flux, flux_err=valid_flux_err,
+    lcd = CurveDash(name=lc_list[0].LABEL, lookup_name=metadata.get('lookup_name', None),
+                    jd=valid_jd + jd0_tess, flux=valid_flux, flux_err=valid_flux_err,
                     time_unit=time_unit, timescale='tdb',
-                    flux_unit=flux_unit, title=title,
+                    flux_unit=flux_unit,
                     folded_view=phase_view,
                     period=period,
                     period_unit='d')
+    title = (f'{lcd.lookup_name} {lc_list[0].LABEL} sector: {",".join(sectors)} author: {",".join(authors)} '
+             f'methods: {",".join(flux_origins)}')
+    if stitch:
+        title = 'Stitched curve ' + title
+
+    lcd.title = title
     return lcd.serialize()
 
 
 def plot_lc(js_lightcurve: str, phase_view: bool):
-    lcd = CurveDash(js_lightcurve)
+    lcd = CurveDash.from_serialized(js_lightcurve)
     title = lcd.title
     flux_unit = lcd.flux_unit
 
@@ -549,6 +573,20 @@ def plot_lc(js_lightcurve: str, phase_view: bool):
                       # dragmode='lasso'  # Enable lasso selection mode by default
                       )
 
+    # fig = go.Figure()
+
+    # fig.add_trace(go.Scatter(
+    #     x=x, y=lcd.flux,
+    #     error_y=dict(type='data', array=lcd.flux_err, visible=True),
+    #     selected={'marker': {'color': 'orange', 'size': 5}},
+    #     hoverinfo='none',  # Important
+    #     hovertemplate=None,
+    #     # mode='markers+lines',
+    #     mode='markers',
+    #     marker=dict(color='blue', size=6, symbol='circle'),
+    #     # line=dict(color='blue', width=1)  # , dash='dash')
+    # ))
+
     fig.update_layout(
         title=title,
         showlegend=False,
@@ -560,24 +598,47 @@ def plot_lc(js_lightcurve: str, phase_view: bool):
     return fig
 
 
+# @callback(
+#     Output('store_tess_lightcurve', 'data', allow_duplicate=True),
+#     Input('fold_tess_lc_switch', 'value'),
+#     State('store_tess_lightcurve', 'data'),
+#     State('period_tess_lc_input', 'value'),
+#     prevent_initial_call=True
+# )
+# def fold(fold_lc, js_lightcurve: str, period):
+#     period_unit = 'd'
+#     # if n_clicks is None:
+#     #     raise PreventUpdate
+#     lcd = CurveDash.from_serialized(js_lightcurve)
+#     lcd.folded_view = fold_lc
+#     lcd.period = period
+#     lcd.period_unit = period_unit
+#     return lcd.serialize()
+
+
 @callback(
-    Output('store_tess_lightcurve', 'data', allow_duplicate=True),
-    [Input('recreate_selected_tess_lc_button', 'n_clicks'),
-     State('data_tess_lc_table', 'selected_rows'),
-     State('data_tess_lc_table', 'data'),
-     State('stitch_switch', 'value'),
-     State('flux_tess_lc_switch', 'value'),
-     State('fold_tess_lc_switch', 'value'),
-     State('period_tess_lc_input', 'value')],
+    output=dict(lc=Output('store_tess_lightcurve', 'data', allow_duplicate=True)),
+    inputs=dict(n_clicks=Input('recreate_selected_tess_lc_button', 'n_clicks'), ),
+    state=dict(
+        selected_rows=State('data_tess_lc_table', 'selected_rows'),
+        table_data=State('data_tess_lc_table', 'data'),
+        stitch=State('stitch_switch', 'value'),
+        flux_method=State('flux_tess_lc_switch', 'value'),
+        metadata=State('store_tess_lightcurve_metadata', 'data'),
+        phase_view=State('fold_tess_lc_switch', 'value'),
+        period=State('period_tess_lc_input', 'value')
+    ),
     prevent_initial_call=True
 )
-def replot_selected_curves(n_clicks, selected_rows, table_data, stitch, flux_method, phase_view, period):
+def replot_selected_curves(n_clicks, selected_rows, table_data, stitch, flux_method, metadata, phase_view, period):
     if n_clicks is None:
         raise PreventUpdate
     try:
-        lc = create_lc_from_selected_rows(selected_rows, table_data, stitch, flux_method, phase_view, period)
+        lc = create_lc_from_selected_rows(selected_rows, table_data, stitch, flux_method, metadata,
+                                          phase_view, period)
         set_props('div_tess_lc_alert', {'children': None, 'style': {'display': 'none'}})
-        return lc
+        output = {'lc': lc}
+        return output
 
     except Exception as e:
         logging.warning(f'lightcurve_tess.replot_selected_curves: {e}')
@@ -593,10 +654,11 @@ def replot_selected_curves(n_clicks, selected_rows, table_data, stitch, flux_met
     State('period_tess_lc_input', 'value'),
     prevent_initial_call=True)
 def recalculate_phase(n_clicks, js_lightcurve, period):
+    # todo: rewrite it on the client side
     if n_clicks is None:
         raise PreventUpdate
     try:
-        lcd = CurveDash(js_lightcurve)
+        lcd = CurveDash.from_serialized(js_lightcurve)
         lcd.period = period
         period_unit = 'd'
         lcd.period_unit = period_unit
@@ -621,7 +683,7 @@ def fold(phase_view, js_lightcurve, period):
     try:
         if phase_view and not period:
             raise PipeException('Set the period and try again')
-        lcd = CurveDash(js_lightcurve)
+        lcd = CurveDash.from_serialized(js_lightcurve)
         if phase_view:
             lcd.period = period
             period_unit = 'd'
@@ -642,6 +704,7 @@ def fold(phase_view, js_lightcurve, period):
           prevent_initial_call=True
           )
 def plot_tess_curve(js_lightcurve, phase_view):
+    # todo: do it client side, move div_tess_alert stuff to the method, returning store_tess_lightcurve
     try:
         fig = plot_lc(js_lightcurve, phase_view)
         set_props('div_tess_lc_alert', {'children': None, 'style': {'display': 'none'}})
@@ -680,7 +743,7 @@ def periodogram(n_clicks, js_lightcurve, period_freq, method, nterms, oversample
     output = {key: dash.no_update for key in output_keys}
 
     try:
-        lcd = CurveDash(js_lightcurve)
+        lcd = CurveDash.from_serialized(js_lightcurve)
         if lcd.lightcurve is None:
             raise PipeException('Download curves first')
         kurve = lightkurve.LightCurve(time=lcd.jd, flux=lcd.flux, flux_err=lcd.flux_err)
@@ -723,7 +786,7 @@ def periodogram(n_clicks, js_lightcurve, period_freq, method, nterms, oversample
             line=dict(color='blue', width=1)  # , dash='dash')
         ))
 
-        title = 'Periodogram'
+        title = f'Periodogram {lcd.lookup_name} {lcd.name}'
         fig.update_layout(
             title=title,
             showlegend=False,
@@ -744,6 +807,33 @@ def periodogram(n_clicks, js_lightcurve, period_freq, method, nterms, oversample
     return output
 
 
+# ----------- The clientside part ---------
+
+# Plot light curve
+# clientside_callback(
+#     ClientsideFunction(
+#         namespace='clientside',
+#         function_name='plotLightcurveFromStore'
+#     ),
+#     Output('graph_tess_lc', 'figure'),
+#     Input('store_tess_lightcurve', 'data'),
+#     State('graph_tess_lc', 'figure'),
+#     prevent_initial_call=True
+# )
+
+# # Switch between folded and time view. All phases have been recalculated already
+# clientside_callback(
+#     ClientsideFunction(
+#         namespace='clientside',
+#         function_name='updateFoldedView'
+#     ),
+#     Output('store_tess_lightcurve', 'data', allow_duplicate=True),
+#     Input('fold_tess_lc_switch', 'value'),
+#     State('store_tess_lightcurve', 'data'),
+#     prevent_initial_call=True
+# )
+
+# Mark data as selected
 clientside_callback(
     ClientsideFunction(
         namespace='clientside',
@@ -755,6 +845,32 @@ clientside_callback(
     State('store_tess_lightcurve', 'data'),
     prevent_initial_call=True
 )
+
+
+# Unmark data
+# clientside_callback(
+#     ClientsideFunction(
+#         namespace='clientside',
+#         function_name='unselectData'
+#     ),
+#     Output('store_tess_lightcurve', 'data', allow_duplicate=True),
+#     Input('btn_tess_unselect', 'n_clicks'),
+#     State('store_tess_lightcurve', 'data'),
+#     prevent_initial_call=True
+# )
+
+
+# Delete selected points
+# clientside_callback(
+#     ClientsideFunction(
+#         namespace='clientside',
+#         function_name='deleteSelected'
+#     ),
+#     Output('store_tess_lightcurve', 'data', allow_duplicate=True),
+#     Input('btn_tess_delete', 'n_clicks'),
+#     State('store_tess_lightcurve', 'data'),
+#     prevent_initial_call=True
+# )
 
 
 @callback(
@@ -769,14 +885,15 @@ clientside_callback(
         selected_rows=State('data_tess_lc_table', 'selected_rows'),
         table_data=State('data_tess_lc_table', 'data'),
         stitch=State('stitch_switch', 'value'),
-        flux_method=State('flux_tess_lc_switch', 'value')
+        flux_method=State('flux_tess_lc_switch', 'value'),
+        metadata=State('store_tess_lightcurve_metadata', 'data'),
     ),
-    background=True,
+    background=background_callback,
     running=[(Output('download_tess_lc_button', 'disabled'), True, False),
              (Output('cancel_download_tess_lc_button', 'disabled'), False, True)],
     cancel=[Input('cancel_download_tess_lc_button', 'n_clicks')],
     prevent_initial_call=True)
-def download_tess_lc_curve(n_clicks, selected_rows, table_data, stitch, flux_method):
+def download_tess_lc_curve(n_clicks, selected_rows, table_data, stitch, flux_method, metadata):
     """
     This method checks for the presence of light curves in the local cache.
     If any are missing, it downloads the absent light curves from the remote database.
@@ -792,7 +909,7 @@ def download_tess_lc_curve(n_clicks, selected_rows, table_data, stitch, flux_met
 
     try:
         # Store the loaded light curve into dcc.Store
-        output['lightcurve'] = create_lc_from_selected_rows(selected_rows, table_data, stitch, flux_method)
+        output['lightcurve'] = create_lc_from_selected_rows(selected_rows, table_data, stitch, flux_method, metadata)
         output['graph_tab_disabled'] = False
         output['active_tab'] = 'tess_lc_graph_tab'
         output['message_results'] = 'Success, switch to the next Tab'
@@ -822,12 +939,12 @@ def download_to_user_tess_lc_lightcurve(n_clicks, js_lightcurve, table_format):
     if js_lightcurve is None:
         raise PreventUpdate
     try:
-        lcd = CurveDash(js_lightcurve)
+        lcd = CurveDash.from_serialized(js_lightcurve)
         # raise PipeException('test')
         # bstring is "bytes"
         file_bstring = lcd.download(table_format)
 
-        outfile_base = f'lc_tess_' + lcd.title.replace(' ', '_').replace(':', '').replace(',', '')
+        outfile_base = f'lc_tess_' + sanitize_filename(lcd.title)
         ext = lcd.get_file_extension(table_format)
         outfile = f'{outfile_base}.{ext}'
 
@@ -898,5 +1015,85 @@ clientside_callback(
     prevent_initial_call=True
 )
 
-if __name__ == '__main__':
-    app.run_server(debug=True)
+
+@callback(
+    output=dict(
+        lightcurve=Output('store_tess_lightcurve', 'data', allow_duplicate=True),
+        message_results=Output('download_tess_lc_result', 'children', allow_duplicate=True),
+        graph_tab_disabled=Output('tess_lc_graph_tab', 'disabled', allow_duplicate=True),
+        active_tab=Output('tess_lc_tabs', 'active_tab', allow_duplicate=True),
+    ),
+    inputs=dict(contents=Input('upload_tess_lc', 'contents')),
+    state=dict(
+        filename=State('upload_tess_lc', 'filename'),
+        append=State('append_switch', 'value'),
+        js_lightcurve=State('store_tess_lightcurve', 'data'),
+    ),
+    prevent_initial_call=True)
+def handle_upload(contents, filename, append, js_lightcurve):
+    output_keys = list(ctx.outputs_grouping.keys())
+    output = {key: dash.no_update for key in output_keys}
+    if contents is None:
+        raise PreventUpdate
+    try:
+        extension = Path(filename).suffix[1:]
+        content_type, content_string = contents.split(',')
+        decoded = base64.b64decode(content_string)
+
+        file_obj = io.BytesIO(decoded)
+        # t = Table.read(file_obj, format=CurveDash.get_table_format(extension))
+        # flux_unit = str(getattr(t['flux'], 'unit', ''))
+        # lcd = CurveDash(jd=t['time'].jd, flux=t['flux'], flux_err=t['flux_err'], flux_unit=flux_unit, time_unit='d')
+        lcd = CurveDash.from_file(file_obj, extension)
+        # metadata = getattr(t, 'meta', None)
+        # if metadata:
+        #     lcd.metadata = lcd.metadata | metadata  # update metadata
+        if append and js_lightcurve:
+            lcd_stored = CurveDash.from_serialized(js_lightcurve)
+            lcd_stored.append(lcd)
+            output['lightcurve'] = lcd_stored.serialize()
+        else:
+            output['lightcurve'] = lcd.serialize()
+        output['graph_tab_disabled'] = False
+        output['active_tab'] = 'tess_lc_graph_tab'
+        output['message_results'] = 'Success, switch to the next Tab'
+        set_props('div_tess_lc_download_alert', {'children': '', 'style': {'display': 'none'}})
+    except Exception as e:
+        logging.warning(f'lightcurve_tess.handle_upload {e}')
+        alert_message = message.warning_alert(e)
+        output['graph_tab_disabled'] = True
+        output['message_results'] = ''
+        set_props('div_tess_lc_download_alert', {'children': alert_message, 'style': {'display': 'block'}})
+    set_props('fold_tess_lc_switch', {'value': False})
+    return output
+
+
+if __name__ == '__main__':  # So this is a local version
+    from dash import Dash
+    if DISK_CACHE:
+        # Background callback management:
+        import diskcache
+        from dash import DiskcacheManager
+        from pathlib import Path
+
+        diskcache_dir = Path('diskcache')
+        diskcache_dir.mkdir(exist_ok=True)
+        background_callback_manager = DiskcacheManager(diskcache.Cache(diskcache_dir.name))
+    else:
+        background_callback_manager = None
+
+    app = Dash(__name__,
+               background_callback_manager=background_callback_manager,
+               external_stylesheets=[dbc.themes.BOOTSTRAP])
+
+    app.layout = page_layout
+    app.run_server(debug=True, port=8051)
+else:
+    register_page(__name__, name='TESS curve',
+                  order=4,
+                  path='/igebc/tess_lc',
+                  title='TESS lightcurve Tool',
+                  in_navbar=True)
+
+    def layout():
+        return page_layout
